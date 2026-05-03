@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-cliente.py — UDP sum client.
 
-Reads integers from stdin (one per line), sends each to the server via a
-reliable exactly-once request/ACK protocol, and prints the server's cumulative
-state after each acknowledgement.
-
-Usage:
-    python3 cliente.py <porta>
-"""
 import queue
 import socket
 import sys
@@ -19,10 +10,13 @@ from typing import Tuple
 from network import protocol, udp
 from services.discovery import client_discover, get_local_ip_for_peer
 
-REQUEST_TIMEOUT = 0.01   # 10 ms before retransmit
-
+# Timeout padrão de 10ms para request
+REQUEST_TIMEOUT = 0.01
 
 def timestamp() -> str:
+    """
+        Função auxiliar para retornar data e hora atual já formatada
+    """
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
@@ -124,7 +118,7 @@ def main() -> None:
     port = int(sys.argv[1])
     sock = udp.create_client_socket()
 
-    # Phase 1: discover the server
+    # FASE 1: DESCOBERTA 
     server_addr = client_discover(sock, port)
     if server_addr is None:
         print("ERROR: Server not found after all retries.", file=sys.stderr)

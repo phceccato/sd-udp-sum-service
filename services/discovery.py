@@ -1,12 +1,13 @@
 import socket
 import sys
 from typing import Optional, Tuple
+from models.client_state import ClientState
 
 from network import protocol, udp
 
 BROADCAST_ADDR = '255.255.255.255'
-DISCOVERY_TIMEOUT = 3.0   # seconds per attempt
-DISCOVERY_RETRIES = 10
+DISCOVERY_TIMEOUT = 3.0     # timeout de descoberta
+DISCOVERY_RETRIES = 10      # quantidade de tentativas de descoberta
 
 
 def get_local_ip_for_peer(peer_ip: str) -> str:
@@ -45,10 +46,10 @@ def server_handle_discovery(
     server_port: int,
 ) -> None:
     """
-    Respond to a DISCOVERY broadcast with the server's unicast address.
-    Registers the client in state if not already present.
+        Função que faz o tratamento da fase de descoberta.
+        ->  Responde ao broadcast de descoberta com o endereço do servidor e registra o cliente, se ainda
+            não foi registrado. 
     """
-    from models.client_state import ClientState
 
     server_ip = get_local_ip_for_peer(addr[0])
     response = protocol.make_discovery_response(server_ip, server_port)

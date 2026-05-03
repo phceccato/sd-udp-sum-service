@@ -2,10 +2,12 @@ from typing import Tuple
 
 
 class ClientState:
-    """Per-client state tracked by the server for exactly-once delivery."""
+    """
+        Classe responsável por inicializar e manter o estado dos clientes
+    """
 
     def __init__(self, address: Tuple[str, int]):
         self.address = address
-        self.last_req: int = 0        # highest id_req successfully processed
-        self.last_num_reqs: int = 0   # global num_reqs snapshot when last_req was processed
-        self.last_total_sum: int = 0  # global total_sum snapshot when last_req was processed
+        self.last_req: int = 0        # ultimo id_req processado com sucesso
+        self.last_num_reqs: int = 0   # ultima quantidade de requisições processados 
+        self.last_total_sum: int = 0  # ultimo valor da soma acumulada enviada para o cliente

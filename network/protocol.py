@@ -8,18 +8,28 @@ MSG_ACK = "ACK"
 
 
 def encode(msg: Dict[str, Any]) -> bytes:
+    """
+        Funcao tranforma
+    """
     return json.dumps(msg).encode('utf-8')
 
 
 def decode(data: bytes) -> Dict[str, Any]:
+    """
+        Funcao transforma dados recebidos do socket em dicionario
+    """
     return json.loads(data.decode('utf-8'))
-
-
+    
 def make_discovery() -> bytes:
+    """
+    Funcao para criar uma mensagem referente a fase de descoberta
+    """
     return encode({"type": MSG_DISCOVERY})
 
-
 def make_discovery_response(server_ip: str, port: int) -> bytes:
+    """
+    Funcao responsavel por criar uma resposta do servidor para a fase de descoberta
+    """
     return encode({"type": MSG_DISCOVERY_RESPONSE, "server_ip": server_ip, "port": port})
 
 
