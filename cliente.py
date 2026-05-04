@@ -8,8 +8,8 @@ from typing import Tuple
 from network import protocol, udp
 from services.discovery import client_discover, get_local_ip_for_peer
 
-# timeout de 20ms: retransmite caso o ACK não chegue
-REQUEST_TIMEOUT = 0.02
+# timeout de 10ms: retransmite caso o ACK não chegue
+REQUEST_TIMEOUT = 0.01
 
 def timestamp() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

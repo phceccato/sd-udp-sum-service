@@ -31,7 +31,7 @@ sd-udp-sum-service/
 ## Requisitos
 
 - Python 3.8+
-- Linux
+- Linux ou Windows
 - Sem dependências externas (apenas stdlib)
 
 ## Como executar
@@ -85,29 +85,47 @@ python3 cliente.py 4000 < numeros_a.txt &
 python3 cliente.py 4000 < numeros_b.txt &
 ```
 
+### Windows (PowerShell)
+
+```powershell
+# liberar porta no firewall (executar como administrador)
+New-NetFirewallRule -DisplayName "UDP 4000" -Direction Inbound -Protocol UDP -LocalPort 4000 -Action Allow
+
+# rodar servidor
+python servidor.py 4000
+```
+
 ## Protocolo
 
 Mensagens JSON em UTF-8 sobre UDP.
 
-| Tipo | Direção | Campos |
-|---|---|---|
-| `DISCOVERY` | cliente → broadcast | `type` |
-| `DISCOVERY_RESPONSE` | servidor → cliente | `type`, `server_ip`, `port` |
-| `REQUEST` | cliente → servidor | `type`, `client_id`, `id_req`, `value` |
-| `ACK` | servidor → cliente | `type`, `id_req`, `num_reqs`, `total_sum` |
+| Tipo                   | Direção            | Campos                                            |
+| ---------------------- | -------------------- | ------------------------------------------------- |
+| `DISCOVERY`          | cliente → broadcast | `type`                                          |
+| `DISCOVERY_RESPONSE` | servidor → cliente  | `type`, `server_ip`, `port`                 |
+| `REQUEST`            | cliente → servidor  | `type`, `client_id`, `id_req`, `value`    |
+| `ACK`                | servidor → cliente  | `type`, `id_req`, `num_reqs`, `total_sum` |
 
 ## Garantias de confiabilidade (Exactly-Once)
 
 ### Servidor (por cliente)
 
-| Condição | Ação |
-|---|---|
-| `id_req == last_req + 1` | Processa, atualiza estado global, envia ACK novo |
-| `id_req <= last_req` | Duplicata — reenvia último ACK cacheado sem alterar estado |
-| `id_req > last_req + 1` | Fora de ordem — envia ACK do último req processado |
+| Condição                 | Ação                                                       |
+| -------------------------- | ------------------------------------------------------------ |
+| `id_req == last_req + 1` | Processa, atualiza estado global, envia ACK novo             |
+| `id_req <= last_req`     | Duplicata — reenvia último ACK cacheado sem alterar estado |
+| `id_req > last_req + 1`  | Fora de ordem — envia ACK do último req processado         |
 
 ### Cliente
 
 - Uma única requisição ativa por vez
 - Timeout de **10 ms** → retransmite até receber o ACK correto
+- Descoberta via broadcast com timeout de **3 segundos** e até **10 tentativas**
 - `id_req` começa em 1 e incrementa a cada novo valor enviado
+
+## Observações
+
+- O endereço de broadcast é detectado automaticamente pela interface de rede ativa
+- No Linux usa `ioctl` para consultar o broadcast real da interface
+- No Windows deriva o broadcast a partir do IP local assumindo sub-rede `/24`
+- Em caso de falha na detecção, usa `255.255.255.255` como fallback

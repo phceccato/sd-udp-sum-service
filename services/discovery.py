@@ -85,8 +85,8 @@ def _get_broadcast_addr_windows() -> str:
 
 def client_discover(sock: socket.socket, port: int) -> Optional[Tuple[str, int]]:
     """
-    Broadcast DISCOVERY on the given port and wait for a DISCOVERY_RESPONSE.
-    Returns (server_ip, server_port) or None on failure.
+    Envia broadcast de descoberta na porta informada e aguarda resposta do servidor.
+    Retorna (ip_servidor, porta) ou None se nao encontrar servidor.
     """
     # detecta o broadcast correto da rede automaticamente
     broadcast_addr = get_broadcast_addr()
