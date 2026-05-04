@@ -19,8 +19,9 @@ def create_server_socket(port: int) -> socket.socket:
     """
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # SO_REUSEADDR: permite reuso da porta para casos de reinicio do servidor
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+    # SO_REUSEADDR: permite reiniciar o servidor na mesma porta sem esperar o sistema liberar
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # SO_BROADCAST: necessário para receber e responder pacotes de broadcast
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.bind(('', port))
     
@@ -30,9 +31,6 @@ def create_server_socket(port: int) -> socket.socket:
 def create_client_socket() -> socket.socket:
     """
         Cria um socket UDP do cliente com broadcast habilitado.
-
-        Returns:
-            socket.socket: Socket do cliente.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -49,9 +47,7 @@ def send(sock: socket.socket, data: bytes, addr: Tuple[str, int]) -> None:
 
 
 def receive(sock: socket.socket, timeout: Optional[float] = None) -> Tuple[bytes, Tuple[str, int]]:
-    """
-
-    """
+    # salva o timeout anterior e restaura no finally — evita efeito colateral no socket
     old_timeout = sock.gettimeout()
     if timeout is not None:
         sock.settimeout(timeout)
