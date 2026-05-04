@@ -1,7 +1,4 @@
-import array
-import fcntl
 import socket
-import struct
 import sys
 from typing import Optional, Tuple
 from models.client_state import ClientState
@@ -25,8 +22,19 @@ def get_local_ip_for_peer(peer_ip: str) -> str:
 
 
 def get_broadcast_addr() -> str:
-    # detecta automaticamente o broadcast da interface de rede ativa
+    # tenta detectar o broadcast automaticamente conforme o sistema operacional
+    if sys.platform == 'win32':
+        return _get_broadcast_addr_windows()
+    return _get_broadcast_addr_linux()
+
+
+def _get_broadcast_addr_linux() -> str:
+    # no Linux usa ioctl para consultar o broadcast real da interface ativa
     try:
+        import array
+        import fcntl
+        import struct
+
         SIOCGIFCONF    = 0x8912
         SIOCGIFBRDADDR = 0x8919
         buf = array.array('B', b'\0' * 1024)
@@ -42,6 +50,7 @@ def get_broadcast_addr() -> str:
             family = struct.unpack_from('H', ifaces_raw, offset + 16)[0]
             if family == socket.AF_INET:
                 ip = socket.inet_ntoa(ifaces_raw[offset + 20:offset + 24])
+                # ignora loopback e interface docker
                 if not ip.startswith('127.') and not ip.startswith('172.'):
                     ifreq = struct.pack('16sH2s4s8s', ifname.encode(),
                                        socket.AF_INET, b'\x00' * 2,
@@ -55,7 +64,22 @@ def get_broadcast_addr() -> str:
     except Exception:
         pass
 
-    # fallback: broadcast genérico caso a detecção falhe
+    return '255.255.255.255'
+
+
+def _get_broadcast_addr_windows() -> str:
+    # no Windows deriva o broadcast a partir do IP local assumindo sub-rede /24
+    # (padrao na grande maioria das redes de laboratorio)
+    try:
+        local_ip = get_local_ip_for_peer('8.8.8.8')
+        if not local_ip.startswith('127.'):
+            # pega os 3 primeiros octetos e substitui o ultimo por 255
+            # ex: 192.168.0.11 -> 192.168.0.255
+            prefix = local_ip.rsplit('.', 1)[0]
+            return f"{prefix}.255"
+    except Exception:
+        pass
+
     return '255.255.255.255'
 
 
@@ -64,9 +88,9 @@ def client_discover(sock: socket.socket, port: int) -> Optional[Tuple[str, int]]
     Broadcast DISCOVERY on the given port and wait for a DISCOVERY_RESPONSE.
     Returns (server_ip, server_port) or None on failure.
     """
- 
+    # detecta o broadcast correto da rede automaticamente
     broadcast_addr = get_broadcast_addr()
-    print(f"Endereço de broadcast detectado: {broadcast_addr}", file=sys.stderr)
+    print(f"Endereco de broadcast detectado: {broadcast_addr}", file=sys.stderr)
 
     msg = protocol.make_discovery()
 
@@ -77,7 +101,7 @@ def client_discover(sock: socket.socket, port: int) -> Optional[Tuple[str, int]]
             data, _addr = udp.receive(sock, timeout=DISCOVERY_TIMEOUT)
             response = protocol.decode(data)
             if response.get('type') == protocol.MSG_DISCOVERY_RESPONSE:
-                # servidor respondeu com seu IP e porta
+                # servidor respondeu com seu IP e porta reais
                 return response['server_ip'], response['port']
         except socket.timeout:
             print(f"Tentativa {attempt}/{DISCOVERY_RETRIES} sem resposta, tentando novamente...",
@@ -94,15 +118,15 @@ def server_handle_discovery(
     server_port: int,
 ) -> None:
     """
-        Função que faz o tratamento da fase de descoberta.
-        ->  Responde ao broadcast de descoberta com o endereço do servidor e registra o cliente, se ainda
-            não foi registrado.
+        Funcao que faz o tratamento da fase de descoberta.
+        ->  Responde ao broadcast de descoberta com o endereco do servidor e registra o cliente, se ainda
+            nao foi registrado.
     """
-    # descobre o IP real da interface que alcança o cliente
+    # descobre o IP real da interface que alcanca o cliente
     server_ip = get_local_ip_for_peer(addr[0])
     response = protocol.make_discovery_response(server_ip, server_port)
 
-    # responde diretamente ao cliente (unicast), não em broadcast
+    # responde diretamente ao cliente (unicast), nao em broadcast
     udp.send(sock, response, addr)
 
     # registra o cliente na tabela se for a primeira vez que aparece
