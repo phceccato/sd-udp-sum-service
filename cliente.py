@@ -8,7 +8,7 @@ from typing import Tuple
 from network import protocol, udp
 from services.discovery import client_discover, get_local_ip_for_peer
 
-# timeout de 10ms: retransmite caso o ACK não chegue
+# 10ms timeout: retransmit if ACK is not received in time
 REQUEST_TIMEOUT = 0.01
 
 def timestamp() -> str:
@@ -16,7 +16,6 @@ def timestamp() -> str:
 
 
 def reader_thread(input_queue: queue.Queue, stop_event: threading.Event) -> None:
-    # thread 1: lê números do teclado (ou arquivo) e coloca na fila
     try:
         for line in sys.stdin:
             if stop_event.is_set():
@@ -31,7 +30,7 @@ def reader_thread(input_queue: queue.Queue, stop_event: threading.Event) -> None
     except EOFError:
         pass
     finally:
-        # sinal de fim: avisa a thread que não virão mais números
+        # sentinel: signals sender thread that no more values are coming
         input_queue.put(None)
 
 
@@ -42,7 +41,7 @@ def sender_thread(
     input_queue: queue.Queue,
     stop_event: threading.Event,
 ) -> None:
-    # thread 2: pega os números da fila e envia ao servidor
+    # exactly-once: each value gets a unique sequential id
     id_req = 0
 
     while not stop_event.is_set():
@@ -54,11 +53,9 @@ def sender_thread(
         if value is None:
             break
 
-        # semântica exactly-once - cada número tem um id sequencial único
         id_req += 1
         msg = protocol.make_request(client_id, id_req, value)
 
-        # loop de retransmissão: só avança quando receber o ACK correto
         while not stop_event.is_set():
             try:
                 udp.send(sock, msg, server_addr)
@@ -70,7 +67,6 @@ def sender_thread(
                 data, _addr = udp.receive(sock, timeout=REQUEST_TIMEOUT)
                 response = protocol.decode(data)
             except socket.timeout:
-                # não chegou ACK - retransmite o mesmo id_req
                 continue
             except Exception as exc:
                 print(f"Receive error: {exc}", file=sys.stderr)
@@ -82,7 +78,6 @@ def sender_thread(
             ack_id = response.get('id_req')
 
             if ack_id == id_req:
-                # ACK correto recebido = imprime resultado e vai para o próximo número
                 num_reqs = response['num_reqs']
                 total_sum = response['total_sum']
                 print(
@@ -92,18 +87,17 @@ def sender_thread(
                 sys.stdout.flush()
                 break
 
-            # ACK de outro id_req = ignora e continua esperando
+            # stale ACK — ignore and keep waiting
 
 
 def main() -> None:
     if len(sys.argv) != 2:
-        print(f"Usage: python3 {sys.argv[0]} <porta>", file=sys.stderr)
+        print(f"Usage: python3 {sys.argv[0]} <port>", file=sys.stderr)
         sys.exit(1)
 
     port = int(sys.argv[1])
     sock = udp.create_client_socket()
 
-    # FASE 1: encontra o servidor via broadcast
     server_addr = client_discover(sock, port)
     if server_addr is None:
         print("ERROR: Server not found after all retries.", file=sys.stderr)
@@ -113,13 +107,12 @@ def main() -> None:
     print(f"{timestamp()} server_addr {server_addr[0]}")
     sys.stdout.flush()
 
-    # descobre o IP local real (socket está em 0.0.0.0)
+    # resolve actual local IP since socket is bound to 0.0.0.0
     local_ip, local_port = sock.getsockname()
     if local_ip == '0.0.0.0':
         local_ip = get_local_ip_for_peer(server_addr[0])
     client_id = f"{local_ip}:{local_port}"
 
-    # FASE 2: PROCESSAMENTO — duas threads se comunicam pela fila
     input_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
 
@@ -139,7 +132,6 @@ def main() -> None:
     t_reader.start()
     t_sender.start()
 
-    # aguarda a thread enviadora terminar (ela sai ao receber None da fila)
     t_sender.join()
     stop_event.set()
     t_reader.join(timeout=1.0)

@@ -5,14 +5,14 @@ from models.client_state import ClientState
 
 from network import protocol, udp
 
-DISCOVERY_TIMEOUT = 3.0     # timeout de descoberta
-DISCOVERY_RETRIES = 10      # quantidade de tentativas de descoberta
+DISCOVERY_TIMEOUT = 3.0
+DISCOVERY_RETRIES = 10
 
 
 def get_local_ip_for_peer(peer_ip: str) -> str:
-    # connect em UDP não envia pacote — apenas consulta a tabela de roteamento do SO
-    # o getsockname retorna qual IP local seria usado para alcançar peer_ip
-    # resolve o problema de o socket estar ligado em 0.0.0.0
+    # UDP connect does not send a packet — it only queries the OS routing table.
+    # getsockname returns which local IP would be used to reach peer_ip,
+    # solving the issue of the socket being bound to 0.0.0.0.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         try:
             s.connect((peer_ip, 80))
@@ -22,14 +22,13 @@ def get_local_ip_for_peer(peer_ip: str) -> str:
 
 
 def get_broadcast_addr() -> str:
-    # tenta detectar o broadcast automaticamente conforme o sistema operacional
     if sys.platform == 'win32':
         return _get_broadcast_addr_windows()
     return _get_broadcast_addr_linux()
 
 
 def _get_broadcast_addr_linux() -> str:
-    # no Linux usa ioctl para consultar o broadcast real da interface ativa
+    # use ioctl to query the real broadcast address of the active interface
     try:
         import array
         import fcntl
@@ -50,7 +49,7 @@ def _get_broadcast_addr_linux() -> str:
             family = struct.unpack_from('H', ifaces_raw, offset + 16)[0]
             if family == socket.AF_INET:
                 ip = socket.inet_ntoa(ifaces_raw[offset + 20:offset + 24])
-                # ignora loopback e interface docker
+                # skip loopback and docker interfaces
                 if not ip.startswith('127.') and not ip.startswith('172.'):
                     ifreq = struct.pack('16sH2s4s8s', ifname.encode(),
                                        socket.AF_INET, b'\x00' * 2,
@@ -68,13 +67,11 @@ def _get_broadcast_addr_linux() -> str:
 
 
 def _get_broadcast_addr_windows() -> str:
-    # no Windows deriva o broadcast a partir do IP local assumindo sub-rede /24
-    # (padrao na grande maioria das redes de laboratorio)
+    # derive broadcast from local IP assuming /24 subnet (common in lab networks)
+    # e.g. 192.168.0.11 -> 192.168.0.255
     try:
         local_ip = get_local_ip_for_peer('8.8.8.8')
         if not local_ip.startswith('127.'):
-            # pega os 3 primeiros octetos e substitui o ultimo por 255
-            # ex: 192.168.0.11 -> 192.168.0.255
             prefix = local_ip.rsplit('.', 1)[0]
             return f"{prefix}.255"
     except Exception:
@@ -84,30 +81,22 @@ def _get_broadcast_addr_windows() -> str:
 
 
 def client_discover(sock: socket.socket, port: int) -> Optional[Tuple[str, int]]:
-    """
-    Envia broadcast de descoberta na porta informada e aguarda resposta do servidor.
-    Retorna (ip_servidor, porta) ou None se nao encontrar servidor.
-    """
-    # detecta o broadcast correto da rede automaticamente
     broadcast_addr = get_broadcast_addr()
-    print(f"Endereco de broadcast detectado: {broadcast_addr}", file=sys.stderr)
+    print(f"Broadcast address: {broadcast_addr}", file=sys.stderr)
 
     msg = protocol.make_discovery()
 
     for attempt in range(1, DISCOVERY_RETRIES + 1):
-        # envia para toda a rede local: "tem servidor na porta X?"
         udp.send(sock, msg, (broadcast_addr, port))
         try:
             data, _addr = udp.receive(sock, timeout=DISCOVERY_TIMEOUT)
             response = protocol.decode(data)
             if response.get('type') == protocol.MSG_DISCOVERY_RESPONSE:
-                # servidor respondeu com seu IP e porta reais
                 return response['server_ip'], response['port']
         except socket.timeout:
-            print(f"Tentativa {attempt}/{DISCOVERY_RETRIES} sem resposta, tentando novamente...",
+            print(f"Attempt {attempt}/{DISCOVERY_RETRIES} timed out, retrying...",
                   file=sys.stderr)
 
-    # esgotou todas as tentativas sem encontrar servidor
     return None
 
 
@@ -117,19 +106,13 @@ def server_handle_discovery(
     state,
     server_port: int,
 ) -> None:
-    """
-        Funcao que faz o tratamento da fase de descoberta.
-        ->  Responde ao broadcast de descoberta com o endereco do servidor e registra o cliente, se ainda
-            nao foi registrado.
-    """
-    # descobre o IP real da interface que alcanca o cliente
+    # get the actual interface IP that can reach the client
     server_ip = get_local_ip_for_peer(addr[0])
     response = protocol.make_discovery_response(server_ip, server_port)
 
-    # responde diretamente ao cliente (unicast), nao em broadcast
+    # respond via unicast, not broadcast
     udp.send(sock, response, addr)
 
-    # registra o cliente na tabela se for a primeira vez que aparece
     with state.lock:
         if addr not in state.clients:
             state.clients[addr] = ClientState(address=addr)

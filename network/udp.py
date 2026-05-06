@@ -3,51 +3,30 @@ from typing import Optional, Tuple
 
 BUFFER_SIZE = 65535
 
-""""
-    * Arquivo responsável por centralizar todas as funções/operações relacionadas ao protocolo UDP
-"""
 
 def create_server_socket(port: int) -> socket.socket:
-    """
-        Cria socket UDP do servidor com broadcast habilitado, vinculado a uma porta passada como parametro da função.
-
-        Args:
-            port (int): Porta que será utilizada para o recebimento de mensagens.
-
-        Retornos:
-            socket.socket: Socket do servidor.
-    """
-    
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # SO_REUSEADDR: permite reiniciar o servidor na mesma porta sem esperar o sistema liberar
+    # SO_REUSEADDR: allows restarting on the same port without waiting for OS to release it
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # SO_BROADCAST: necessário para receber e responder pacotes de broadcast
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.bind(('', port))
-    
     return sock
 
 
 def create_client_socket() -> socket.socket:
-    """
-        Cria um socket UDP do cliente com broadcast habilitado.
-    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    # porta 0: SO define aleatoriamente uma porta para o socket
+    # port 0: OS assigns an ephemeral port
     sock.bind(('', 0))
     return sock
 
 
 def send(sock: socket.socket, data: bytes, addr: Tuple[str, int]) -> None:
-    """
-        Envia dados, recebidos em bytes, para o endereço passado como parâmetro.
-    """
     sock.sendto(data, addr)
 
 
 def receive(sock: socket.socket, timeout: Optional[float] = None) -> Tuple[bytes, Tuple[str, int]]:
-    # salva o timeout anterior e restaura no finally — evita efeito colateral no socket
+    # save and restore timeout to avoid side effects on the shared socket
     old_timeout = sock.gettimeout()
     if timeout is not None:
         sock.settimeout(timeout)
