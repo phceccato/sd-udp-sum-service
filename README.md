@@ -1,4 +1,4 @@
-# Trabalho Sistemas Distribuídos
+# Implementação de um Serviço Distribuído de Soma Utilizando UDP e Python
 
 ## Descrição
 
