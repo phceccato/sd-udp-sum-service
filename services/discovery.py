@@ -1,5 +1,6 @@
 import socket
 import sys
+import time
 from typing import Optional, Tuple
 from models.client_state import ClientState
 
@@ -88,14 +89,24 @@ def client_discover(sock: socket.socket, port: int) -> Optional[Tuple[str, int]]
 
     for attempt in range(1, DISCOVERY_RETRIES + 1):
         udp.send(sock, msg, (broadcast_addr, port))
-        try:
-            data, _addr = udp.receive(sock, timeout=DISCOVERY_TIMEOUT)
-            response = protocol.decode(data)
-            if response.get('type') == protocol.MSG_DISCOVERY_RESPONSE:
-                return response['server_ip'], response['port']
-        except socket.timeout:
-            print(f"Attempt {attempt}/{DISCOVERY_RETRIES} timed out, retrying...",
-                  file=sys.stderr)
+        deadline = time.monotonic() + DISCOVERY_TIMEOUT
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                data, _addr = udp.receive(sock, timeout=remaining)
+                response = protocol.decode(data)
+                if response.get('type') == protocol.MSG_DISCOVERY_RESPONSE:
+                    return response['server_ip'], response['port']
+                if response.get('type') == protocol.MSG_NEW_LEADER:
+                    # New primary pushed its address while we were re-discovering
+                    return response['ip'], response['port']
+                # Any other message type (stale ACK, etc.) — keep draining
+            except socket.timeout:
+                break
+        print(f"Attempt {attempt}/{DISCOVERY_RETRIES} timed out, retrying...",
+              file=sys.stderr)
 
     return None
 
@@ -105,7 +116,16 @@ def server_handle_discovery(
     addr: Tuple[str, int],
     state,
     server_port: int,
+    rm_state=None,
 ) -> None:
+    # Only the primary responds; backups stay silent so the client always
+    # reaches the current leader via broadcast
+    if rm_state is not None:
+        from models.rm_state import Role
+        with rm_state.lock:
+            if rm_state.role != Role.PRIMARY:
+                return
+
     # get the actual interface IP that can reach the client
     server_ip = get_local_ip_for_peer(addr[0])
     response = protocol.make_discovery_response(server_ip, server_port)
@@ -113,6 +133,7 @@ def server_handle_discovery(
     # respond via unicast, not broadcast
     udp.send(sock, response, addr)
 
+    client_key = f"{addr[0]}:{addr[1]}"
     with state.lock:
-        if addr not in state.clients:
-            state.clients[addr] = ClientState(address=addr)
+        if client_key not in state.clients:
+            state.clients[client_key] = ClientState(address=addr)

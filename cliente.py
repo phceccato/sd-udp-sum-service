@@ -2,6 +2,7 @@ import queue
 import socket
 import sys
 import threading
+import time
 from datetime import datetime
 from typing import Tuple
 
@@ -10,6 +11,11 @@ from services.discovery import client_discover, get_local_ip_for_peer
 
 # 10ms timeout: retransmit if ACK is not received in time
 REQUEST_TIMEOUT = 0.01
+
+# After this many consecutive timeouts, try re-discovering a new primary
+FAILOVER_THRESHOLD = 5
+# Minimum interval between re-discovery attempts (avoids broadcast storms)
+REDISCOVERY_INTERVAL = 1.0
 
 def timestamp() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -36,13 +42,15 @@ def reader_thread(input_queue: queue.Queue, stop_event: threading.Event) -> None
 
 def sender_thread(
     sock: socket.socket,
-    server_addr: Tuple[str, int],
+    server_addr_ref: list,
     client_id: str,
     input_queue: queue.Queue,
     stop_event: threading.Event,
+    service_port: int,
 ) -> None:
     # exactly-once: each value gets a unique sequential id
     id_req = 0
+    last_rediscovery: float = 0.0
 
     while not stop_event.is_set():
         try:
@@ -55,8 +63,10 @@ def sender_thread(
 
         id_req += 1
         msg = protocol.make_request(client_id, id_req, value)
+        consecutive_timeouts = 0
 
         while not stop_event.is_set():
+            server_addr = server_addr_ref[0]
             try:
                 udp.send(sock, msg, server_addr)
             except OSError as exc:
@@ -66,10 +76,33 @@ def sender_thread(
             try:
                 data, _addr = udp.receive(sock, timeout=REQUEST_TIMEOUT)
                 response = protocol.decode(data)
+                consecutive_timeouts = 0
             except socket.timeout:
+                consecutive_timeouts += 1
+                now = time.monotonic()
+                if (consecutive_timeouts >= FAILOVER_THRESHOLD
+                        and now - last_rediscovery >= REDISCOVERY_INTERVAL):
+                    print("Primary unresponsive, rediscovering...", file=sys.stderr)
+                    new_addr = client_discover(sock, service_port)
+                    last_rediscovery = time.monotonic()
+                    if new_addr:
+                        server_addr_ref[0] = new_addr
+                        consecutive_timeouts = 0
+                        print(f"{timestamp()} server_addr {new_addr[0]}", file=sys.stderr)
+                        sys.stderr.flush()
                 continue
             except Exception as exc:
                 print(f"Receive error: {exc}", file=sys.stderr)
+                continue
+
+            if response.get('type') == protocol.MSG_NEW_LEADER:
+                # New primary actively notified us — redirect immediately
+                new_ip   = response['ip']
+                new_port = response['port']
+                server_addr_ref[0] = (new_ip, new_port)
+                consecutive_timeouts = 0
+                print(f"{timestamp()} server_addr {new_ip}")
+                sys.stdout.flush()
                 continue
 
             if response.get('type') != protocol.MSG_ACK:
@@ -78,7 +111,7 @@ def sender_thread(
             ack_id = response.get('id_req')
 
             if ack_id == id_req:
-                num_reqs = response['num_reqs']
+                num_reqs  = response['num_reqs']
                 total_sum = response['total_sum']
                 print(
                     f"{timestamp()} server {server_addr[0]} id_req {id_req} value {value} "
@@ -113,6 +146,9 @@ def main() -> None:
         local_ip = get_local_ip_for_peer(server_addr[0])
     client_id = f"{local_ip}:{local_port}"
 
+    # Use a mutable list so sender_thread can update the address on failover
+    server_addr_ref = [server_addr]
+
     input_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
 
@@ -124,7 +160,7 @@ def main() -> None:
     )
     t_sender = threading.Thread(
         target=sender_thread,
-        args=(sock, server_addr, client_id, input_queue, stop_event),
+        args=(sock, server_addr_ref, client_id, input_queue, stop_event, port),
         daemon=True,
         name="sender",
     )

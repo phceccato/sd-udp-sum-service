@@ -17,18 +17,26 @@ def server_handle_request(
     addr: Tuple[str, int],
     msg: Dict,
     state: ServerState,
+    rm_state=None,
 ) -> None:
     client_ip = addr[0]
-    id_req = int(msg['id_req'])
-    value = int(msg['value'])
+    id_req    = int(msg['id_req'])
+    value     = int(msg['value'])
+    client_id = msg.get('client_id', f"{addr[0]}:{addr[1]}")
+
+    should_replicate = False
 
     # lock prevents concurrent clients from corrupting shared state
     with state.lock:
 
-        client = state.clients.get(addr)
+        client = state.clients.get(client_id)
         if client is None:
             client = ClientState(address=addr)
-            state.clients[addr] = client
+            state.clients[client_id] = client
+        else:
+            # Client may reconnect from a different interface after failover;
+            # keep the address current so NEW_LEADER notifications reach it.
+            client.address = addr
 
         if id_req == client.last_req + 1:
             # new in-order request: process normally
@@ -46,6 +54,7 @@ def server_handle_request(
             sys.stdout.flush()
 
             ack = protocol.make_ack(id_req, state.num_reqs, state.total_sum)
+            should_replicate = True
 
         elif id_req <= client.last_req:
             # duplicate: previous ACK was lost — retransmit without reprocessing
@@ -66,3 +75,8 @@ def server_handle_request(
             )
 
     udp.send(sock, ack, addr)
+
+    # Propagate state to backups after ACKing the client (fire-and-forget)
+    if should_replicate and rm_state is not None:
+        from services.replication import replicate_to_backups
+        replicate_to_backups(sock, state, rm_state)
