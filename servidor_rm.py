@@ -7,7 +7,7 @@ import time
 from network import protocol, udp
 from models.server_state import ServerState
 from models.rm_state import RMState, Role
-from services.discovery import server_handle_discovery, rm_discover_peers
+from services.discovery import server_handle_discovery, rm_discover_peers, get_local_ip_for_peer
 from services.processing import server_handle_request, timestamp
 from services.replication import apply_replicate
 from services.election import start_election, handle_election_msg
@@ -26,18 +26,28 @@ def _parse_peers(args: list) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) < 4:
+    # Accept both:
+    #   servidor_rm.py <rm_id> <port> [peers...]        — IP auto-detected
+    #   servidor_rm.py <rm_id> <ip> <port> [peers...]   — IP explicit
+    args = sys.argv[1:]
+    if len(args) < 2:
         print(
-            f"Usage: python3 {sys.argv[0]} <rm_id> <ip> <port> "
+            f"Usage: python3 {sys.argv[0]} <rm_id> [ip] <port> "
             "[peer_id:peer_ip:peer_port ...]",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    rm_id  = int(sys.argv[1])
-    my_ip  = sys.argv[2]
-    port   = int(sys.argv[3])
-    peers  = _parse_peers(sys.argv[4:])
+    rm_id = int(args[0])
+    # If the second arg contains a dot it's an IP; otherwise it's the port
+    if '.' in args[1]:
+        my_ip = args[1]
+        port  = int(args[2])
+        peers = _parse_peers(args[3:])
+    else:
+        port  = int(args[1])
+        my_ip = get_local_ip_for_peer('8.8.8.8')
+        peers = _parse_peers(args[2:])
 
     state = ServerState()
     sock  = udp.create_server_socket(port)
