@@ -9,8 +9,11 @@ from typing import Tuple
 from network import protocol, udp
 from services.discovery import client_discover, get_local_ip_for_peer
 
-# 10ms timeout: retransmit if ACK is not received in time
-REQUEST_TIMEOUT = 0.01
+# Retransmit if ACK is not received in time. 100ms gives a real LAN
+# round-trip (plus server processing) room to complete before resending,
+# avoiding a storm of duplicates. On loopback the ACK still returns in <1ms,
+# so this does not slow the happy path — it only bounds the retry on loss.
+REQUEST_TIMEOUT = 0.1
 
 # After this many consecutive timeouts, try re-discovering a new primary
 FAILOVER_THRESHOLD = 5
