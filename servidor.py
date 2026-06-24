@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import socket
 import sys
+import threading
 
 from network import protocol, udp
 from models.server_state import ServerState
@@ -40,7 +41,12 @@ def main() -> None:
                 server_handle_discovery(sock, addr, state, port)
 
             elif msg_type == protocol.MSG_REQUEST:
-                server_handle_request(sock, addr, msg, state)
+                # One thread per request — as required by the spec
+                threading.Thread(
+                    target=server_handle_request,
+                    args=(sock, addr, msg, state),
+                    daemon=True,
+                ).start()
 
             else:
                 print(f"Unknown message type '{msg_type}' from {addr}", file=sys.stderr)
