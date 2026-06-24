@@ -99,6 +99,7 @@ def handle_election_msg(
     addr: tuple,
     rm: RMState,
     on_become_primary: Callable,
+    on_become_backup: Callable = None,
 ) -> None:
     msg_type  = msg["type"]
     sender_id = msg.get("rm_id")
@@ -134,9 +135,13 @@ def handle_election_msg(
         )
         sys.stderr.flush()
         with rm.lock:
+            was_primary             = rm.role == Role.PRIMARY
             rm.leader_id            = sender_id
             rm.leader_addr          = (msg["ip"], msg["port"])
             rm.role                 = Role.BACKUP
+            # Ensure the new leader is in our peer list so future elections
+            # correctly send ELECTION to it (and it can respond with OK).
+            rm.peers[sender_id]     = (msg["ip"], int(msg["port"]))
             rm.election_in_progress = False
             rm.received_ok          = False
             # Reset the failure clock so the monitor doesn't immediately re-trigger
@@ -148,3 +153,7 @@ def handle_election_msg(
             if rm.coordinator_timer:
                 rm.coordinator_timer.cancel()
                 rm.coordinator_timer = None
+        # If we were primary, swap the heartbeat sender for a monitor so we
+        # can detect the new primary's failure and trigger a future election.
+        if was_primary and on_become_backup:
+            on_become_backup()

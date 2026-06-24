@@ -81,6 +81,11 @@ def main() -> None:
     hb_stop  = [None]
 
     def on_become_primary() -> None:
+        # Guard: a COORDINATOR may have arrived between winning the election
+        # and this callback running — don't override a demotion.
+        with rm_state.lock:
+            if rm_state.role != Role.PRIMARY:
+                return
         with _hb_lock:
             old        = hb_stop[0]
             hb_stop[0] = start_heartbeat_sender(sock, rm_state)
@@ -99,6 +104,13 @@ def main() -> None:
                 udp.send(sock, msg, addr)
             except OSError:
                 pass
+
+    def on_become_backup() -> None:
+        with _hb_lock:
+            old        = hb_stop[0]
+            hb_stop[0] = start_heartbeat_monitor(sock, rm_state, on_primary_failure)
+        if old:
+            old.set()  # stop the sender
 
     def on_primary_failure() -> None:
         start_election(sock, rm_state, on_become_primary)
@@ -160,7 +172,7 @@ def main() -> None:
                 protocol.MSG_OK,
                 protocol.MSG_COORDINATOR,
             ):
-                handle_election_msg(sock, msg, addr, rm_state, on_become_primary)
+                handle_election_msg(sock, msg, addr, rm_state, on_become_primary, on_become_backup)
 
             elif msg_type == protocol.MSG_RM_ANNOUNCE:
                 # A new RM joined — add it as a peer and introduce ourselves
