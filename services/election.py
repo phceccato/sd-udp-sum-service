@@ -127,6 +127,7 @@ def handle_election_msg(
         ct.start()
 
     elif msg_type == protocol.MSG_COORDINATOR:
+        import time
         print(
             f"{_ts()} RM {rm.rm_id} received COORDINATOR from RM {sender_id}",
             file=sys.stderr,
@@ -138,6 +139,9 @@ def handle_election_msg(
             rm.role                 = Role.BACKUP
             rm.election_in_progress = False
             rm.received_ok          = False
+            # Reset the failure clock so the monitor doesn't immediately re-trigger
+            # before the new primary has a chance to send its first heartbeat.
+            rm.last_heartbeat       = time.monotonic()
             if rm.victory_timer:
                 rm.victory_timer.cancel()
                 rm.victory_timer = None
