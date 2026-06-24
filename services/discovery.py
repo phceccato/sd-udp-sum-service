@@ -137,3 +137,63 @@ def server_handle_discovery(
     with state.lock:
         if client_key not in state.clients:
             state.clients[client_key] = ClientState(address=addr)
+
+
+# ---------------------------------------------------------------------------
+# RM peer auto-discovery (used when no peers are given on the command line)
+# ---------------------------------------------------------------------------
+
+RM_ANNOUNCE_WINDOW = 2.0  # seconds to wait for peer responses after broadcasting
+
+
+def rm_discover_peers(
+    sock: socket.socket,
+    rm_id: int,
+    my_ip: str,
+    my_port: int,
+) -> dict:
+    """
+    Broadcast RM_ANNOUNCE and collect peers that respond within the window.
+    Also answers RM_ANNOUNCE from other RMs that are starting up simultaneously.
+    Returns {peer_rm_id: (ip, port)}.
+    """
+    broadcast_addr = get_broadcast_addr()
+    announce = protocol.make_rm_announce(rm_id, my_ip, my_port)
+    udp.send(sock, announce, (broadcast_addr, my_port))
+    print(f"RM {rm_id}: broadcasting presence on {broadcast_addr}:{my_port}, "
+          f"waiting {RM_ANNOUNCE_WINDOW}s for peers...", file=sys.stderr)
+
+    peers: dict = {}
+    deadline = time.monotonic() + RM_ANNOUNCE_WINDOW
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            data, _ = udp.receive(sock, timeout=remaining)
+            msg = protocol.decode(data)
+            msg_type = msg.get('type')
+            peer_id  = msg.get('rm_id')
+
+            if peer_id is None or peer_id == rm_id:
+                continue  # ignore own broadcast echo
+
+            if msg_type == protocol.MSG_RM_ANNOUNCE_ACK:
+                peers[peer_id] = (msg['ip'], int(msg['port']))
+
+            elif msg_type == protocol.MSG_RM_ANNOUNCE:
+                peers[peer_id] = (msg['ip'], int(msg['port']))
+                # Reply so the other RM learns about us
+                ack = protocol.make_rm_announce_ack(rm_id, my_ip, my_port)
+                udp.send(sock, ack, (msg['ip'], int(msg['port'])))
+
+        except socket.timeout:
+            break
+
+    if peers:
+        ids = ', '.join(f"RM {pid} @ {ip}:{port}" for pid, (ip, port) in sorted(peers.items()))
+        print(f"RM {rm_id}: found peers — {ids}", file=sys.stderr)
+    else:
+        print(f"RM {rm_id}: no peers found, starting as sole primary", file=sys.stderr)
+
+    return peers

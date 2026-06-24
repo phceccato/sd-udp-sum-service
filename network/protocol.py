@@ -15,6 +15,8 @@ MSG_ELECTION      = "ELECTION"       # RM → higher-ID RMs: start bully electio
 MSG_OK            = "OK"             # higher-ID RM → initiator: "I'm alive, stand down"
 MSG_COORDINATOR   = "COORDINATOR"    # winner → all RMs: "I am the new leader"
 MSG_NEW_LEADER    = "NEW_LEADER"     # new primary → known clients: redirect to new address
+MSG_RM_ANNOUNCE   = "RM_ANNOUNCE"    # new RM → broadcast: "I'm here, add me as peer"
+MSG_RM_ANNOUNCE_ACK = "RM_ANNOUNCE_ACK"  # existing RM → new RM: "I see you, here I am"
 
 
 def encode(msg: Dict[str, Any]) -> bytes:
@@ -72,3 +74,11 @@ def make_coordinator(rm_id: int, ip: str, port: int) -> bytes:
 
 def make_new_leader(ip: str, port: int) -> bytes:
     return encode({"type": MSG_NEW_LEADER, "ip": ip, "port": port})
+
+
+def make_rm_announce(rm_id: int, ip: str, port: int) -> bytes:
+    return encode({"type": MSG_RM_ANNOUNCE, "rm_id": rm_id, "ip": ip, "port": port})
+
+
+def make_rm_announce_ack(rm_id: int, ip: str, port: int) -> bytes:
+    return encode({"type": MSG_RM_ANNOUNCE_ACK, "rm_id": rm_id, "ip": ip, "port": port})

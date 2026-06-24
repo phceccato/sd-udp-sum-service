@@ -7,7 +7,7 @@ import time
 from network import protocol, udp
 from models.server_state import ServerState
 from models.rm_state import RMState, Role
-from services.discovery import server_handle_discovery
+from services.discovery import server_handle_discovery, rm_discover_peers
 from services.processing import server_handle_request, timestamp
 from services.replication import apply_replicate
 from services.election import start_election, handle_election_msg
@@ -39,9 +39,13 @@ def main() -> None:
     port   = int(sys.argv[3])
     peers  = _parse_peers(sys.argv[4:])
 
-    state    = ServerState()
+    state = ServerState()
+    sock  = udp.create_server_socket(port)
+
+    if not peers:
+        peers = rm_discover_peers(sock, rm_id, my_ip, port)
+
     rm_state = RMState(rm_id=rm_id, my_ip=my_ip, my_port=port, peers=peers)
-    sock     = udp.create_server_socket(port)
 
     print(
         f"{timestamp()} RM {rm_id} starting as {rm_state.role.value} "
@@ -138,10 +142,24 @@ def main() -> None:
             ):
                 handle_election_msg(sock, msg, addr, rm_state, on_become_primary)
 
+            elif msg_type == protocol.MSG_RM_ANNOUNCE:
+                # A new RM joined — add it as a peer and introduce ourselves
+                peer_id   = msg.get('rm_id')
+                peer_ip   = msg.get('ip')
+                peer_port = int(msg.get('port', 0))
+                if peer_id and peer_id != rm_id:
+                    with rm_state.lock:
+                        rm_state.peers[peer_id] = (peer_ip, peer_port)
+                    ack = protocol.make_rm_announce_ack(rm_id, my_ip, port)
+                    udp.send(sock, ack, (peer_ip, peer_port))
+                    print(f"{timestamp()} RM {rm_id}: discovered new peer RM {peer_id}",
+                          file=sys.stderr)
+
             elif msg_type in (
+                protocol.MSG_RM_ANNOUNCE_ACK,
                 protocol.MSG_REPLICATE_ACK,
             ):
-                pass  # acknowledged but not required in fire-and-forget mode
+                pass  # handled during startup discovery or not required
 
             else:
                 print(
