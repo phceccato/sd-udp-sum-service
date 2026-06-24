@@ -62,6 +62,16 @@ def main() -> None:
         f"on {my_ip}:{port}",
         file=sys.stderr,
     )
+
+    # If we are the highest-ID RM and there are already peers running, assert
+    # leadership immediately (bully: new highest process sends COORDINATOR).
+    if rm_state.role == Role.PRIMARY and rm_state.peers:
+        coord = protocol.make_coordinator(rm_id, my_ip, port)
+        for addr in rm_state.peers.values():
+            try:
+                udp.send(sock, coord, addr)
+            except OSError:
+                pass
     print(f"{timestamp()} num_reqs 0 total_sum 0")
     sys.stdout.flush()
 
