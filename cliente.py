@@ -9,11 +9,11 @@ from typing import Tuple
 from network import protocol, udp
 from services.discovery import client_discover, get_local_ip_for_peer
 
-# Retransmit if ACK is not received in time. 100ms gives a real LAN
-# round-trip (plus server processing) room to complete before resending,
-# avoiding a storm of duplicates. On loopback the ACK still returns in <1ms,
-# so this does not slow the happy path — it only bounds the retry on loss.
-REQUEST_TIMEOUT = 0.1
+# Retransmit if the matching ACK is not received within this window. 200ms
+# comfortably covers a LAN round-trip plus server processing, so we don't
+# resend before the ACK has a chance to arrive. Small enough that failover
+# detection (FAILOVER_THRESHOLD timeouts) still kicks in within ~1s.
+REQUEST_TIMEOUT = 0.2
 
 # After this many consecutive timeouts, try re-discovering a new primary
 FAILOVER_THRESHOLD = 5
@@ -76,54 +76,72 @@ def sender_thread(
                 print(f"Send error: {exc}", file=sys.stderr)
                 break
 
-            try:
-                data, _addr = udp.receive(sock, timeout=REQUEST_TIMEOUT)
-                response = protocol.decode(data)
+            # Wait for THIS request's ACK. Drain stale/unexpected packets
+            # within the window WITHOUT resending — resending on every stray
+            # packet (old ACKs, repeated NEW_LEADERs) creates a duplicate
+            # feedback storm. Only a real timeout or a leader change resends.
+            got_ack    = False
+            new_leader = False
+            deadline   = time.monotonic() + REQUEST_TIMEOUT
+            while not stop_event.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break  # window elapsed → resend
+                try:
+                    data, _addr = udp.receive(sock, timeout=remaining)
+                    response = protocol.decode(data)
+                except socket.timeout:
+                    break  # → resend
+                except Exception as exc:
+                    print(f"Receive error: {exc}", file=sys.stderr)
+                    continue
+
+                rtype = response.get('type')
+
+                if rtype == protocol.MSG_NEW_LEADER:
+                    # New primary notified us — redirect and resend once
+                    server_addr_ref[0] = (response['ip'], response['port'])
+                    print(f"{timestamp()} server_addr {response['ip']}")
+                    sys.stdout.flush()
+                    new_leader = True
+                    break
+
+                if rtype == protocol.MSG_ACK and response.get('id_req') == id_req:
+                    num_reqs  = response['num_reqs']
+                    total_sum = response['total_sum']
+                    print(
+                        f"{timestamp()} server {server_addr[0]} id_req {id_req} value {value} "
+                        f"num_reqs {num_reqs} total_sum {total_sum}"
+                    )
+                    sys.stdout.flush()
+                    got_ack = True
+                    break
+
+                # stale ACK or unrelated packet — drain it, keep waiting, NO resend
+                continue
+
+            if got_ack:
                 consecutive_timeouts = 0
-            except socket.timeout:
-                consecutive_timeouts += 1
-                now = time.monotonic()
-                if (consecutive_timeouts >= FAILOVER_THRESHOLD
-                        and now - last_rediscovery >= REDISCOVERY_INTERVAL):
-                    print("Primary unresponsive, rediscovering...", file=sys.stderr)
-                    new_addr = client_discover(sock, service_port)
-                    last_rediscovery = time.monotonic()
-                    if new_addr:
-                        server_addr_ref[0] = new_addr
-                        consecutive_timeouts = 0
-                        print(f"{timestamp()} server_addr {new_addr[0]}", file=sys.stderr)
-                        sys.stderr.flush()
-                continue
-            except Exception as exc:
-                print(f"Receive error: {exc}", file=sys.stderr)
-                continue
+                break  # next value
 
-            if response.get('type') == protocol.MSG_NEW_LEADER:
-                # New primary actively notified us — redirect immediately
-                new_ip   = response['ip']
-                new_port = response['port']
-                server_addr_ref[0] = (new_ip, new_port)
+            if new_leader:
                 consecutive_timeouts = 0
-                print(f"{timestamp()} server_addr {new_ip}")
-                sys.stdout.flush()
-                continue
+                continue  # resend current value to the new primary
 
-            if response.get('type') != protocol.MSG_ACK:
-                continue
-
-            ack_id = response.get('id_req')
-
-            if ack_id == id_req:
-                num_reqs  = response['num_reqs']
-                total_sum = response['total_sum']
-                print(
-                    f"{timestamp()} server {server_addr[0]} id_req {id_req} value {value} "
-                    f"num_reqs {num_reqs} total_sum {total_sum}"
-                )
-                sys.stdout.flush()
-                break
-
-            # stale ACK — ignore and keep waiting
+            # genuine timeout — no matching ACK arrived in the window
+            consecutive_timeouts += 1
+            now = time.monotonic()
+            if (consecutive_timeouts >= FAILOVER_THRESHOLD
+                    and now - last_rediscovery >= REDISCOVERY_INTERVAL):
+                print("Primary unresponsive, rediscovering...", file=sys.stderr)
+                new_addr = client_discover(sock, service_port)
+                last_rediscovery = time.monotonic()
+                if new_addr:
+                    server_addr_ref[0] = new_addr
+                    consecutive_timeouts = 0
+                    print(f"{timestamp()} server_addr {new_addr[0]}", file=sys.stderr)
+                    sys.stderr.flush()
+            # loop → resend current value
 
 
 def main() -> None:
