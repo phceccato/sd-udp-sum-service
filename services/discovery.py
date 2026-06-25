@@ -197,3 +197,126 @@ def rm_discover_peers(
         print(f"RM {rm_id}: no peers found, starting as sole primary", file=sys.stderr)
 
     return peers
+
+
+# ---------------------------------------------------------------------------
+# Rejoin support: discover the *current* leader and pull its state
+# ---------------------------------------------------------------------------
+
+# How many probe rounds and how long each round waits for a reply
+LEADER_PROBE_ROUNDS  = 3
+LEADER_PROBE_WINDOW  = 0.6   # seconds per round
+STATE_SYNC_ROUNDS    = 3
+STATE_SYNC_WINDOW    = 0.6   # seconds per round
+
+
+def probe_for_leader(
+    sock: socket.socket,
+    rm_id: int,
+    my_ip: str,
+    my_port: int,
+    peers: dict,
+) -> Optional[Tuple[int, Tuple[str, int]]]:
+    """
+    Ask the cluster who the current leader is, instead of assuming it from
+    max(ID). Sends WHO_IS_LEADER to known peers (unicast) and to the broadcast
+    address, and treats either a COORDINATOR reply or any HEARTBEAT as proof of
+    a live leader. Returns (leader_id, (ip, port)) or None if nobody answers.
+    """
+    msg            = protocol.make_who_is_leader(rm_id, my_ip, my_port)
+    broadcast_addr = get_broadcast_addr()
+
+    for attempt in range(1, LEADER_PROBE_ROUNDS + 1):
+        for addr in list(peers.values()):
+            try:
+                udp.send(sock, msg, addr)
+            except OSError:
+                pass
+        try:
+            udp.send(sock, msg, (broadcast_addr, my_port))
+        except OSError:
+            pass
+
+        deadline = time.monotonic() + LEADER_PROBE_WINDOW
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                data, _addr = udp.receive(sock, timeout=remaining)
+                m = protocol.decode(data)
+            except socket.timeout:
+                break
+            except Exception:
+                continue
+
+            mtype  = m.get('type')
+            sender = m.get('rm_id')
+            # A COORDINATOR (explicit answer) or a HEARTBEAT (the primary is
+            # actively beating) both reveal the current leader's identity.
+            if mtype in (protocol.MSG_COORDINATOR, protocol.MSG_HEARTBEAT) \
+                    and sender is not None and m.get('ip'):
+                leader = (int(sender), (m['ip'], int(m['port'])))
+                print(f"RM {rm_id}: current leader is RM {leader[0]} @ "
+                      f"{leader[1][0]}:{leader[1][1]}", file=sys.stderr)
+                return leader
+            # ignore everything else while probing
+
+        print(f"RM {rm_id}: leader probe {attempt}/{LEADER_PROBE_ROUNDS} "
+              "got no answer", file=sys.stderr)
+
+    print(f"RM {rm_id}: no leader answered — cluster appears leaderless",
+          file=sys.stderr)
+    return None
+
+
+def sync_state_from_leader(
+    sock: socket.socket,
+    leader_addr: Tuple[str, int],
+    rm_id: int,
+    my_ip: str,
+    my_port: int,
+    state,
+) -> bool:
+    """
+    Pull the full current state from the leader before serving. Sends
+    STATE_REQUEST and applies the first STATE_TRANSFER that comes back.
+    Returns True on success. Without this, a returning node (especially one
+    about to reclaim leadership) would operate on an empty state.
+    """
+    from services.replication import apply_replicate
+
+    req = protocol.make_state_request(rm_id, my_ip, my_port)
+    for attempt in range(1, STATE_SYNC_ROUNDS + 1):
+        try:
+            udp.send(sock, req, leader_addr)
+        except OSError:
+            pass
+
+        deadline = time.monotonic() + STATE_SYNC_WINDOW
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                data, _addr = udp.receive(sock, timeout=remaining)
+                m = protocol.decode(data)
+            except socket.timeout:
+                break
+            except Exception:
+                continue
+
+            if m.get('type') == protocol.MSG_STATE_TRANSFER:
+                apply_replicate(m, state)
+                print(f"RM {rm_id}: state synced from leader — "
+                      f"num_reqs {state.num_reqs} total_sum {state.total_sum}",
+                      file=sys.stderr)
+                return True
+            # ignore other traffic while waiting for the snapshot
+
+        print(f"RM {rm_id}: state sync {attempt}/{STATE_SYNC_ROUNDS} "
+              "got no snapshot", file=sys.stderr)
+
+    print(f"RM {rm_id}: state sync failed — proceeding with current state",
+          file=sys.stderr)
+    return False

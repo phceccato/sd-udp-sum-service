@@ -22,7 +22,7 @@ def _sender_loop(
     stop: threading.Event,
 ) -> None:
     while not stop.is_set():
-        msg = protocol.make_heartbeat(rm.rm_id)
+        msg = protocol.make_heartbeat(rm.rm_id, rm.my_ip, rm.my_port)
         for addr in rm.peers.values():
             try:
                 udp.send(sock, msg, addr)

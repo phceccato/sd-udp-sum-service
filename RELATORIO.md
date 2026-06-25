@@ -50,7 +50,8 @@ models/
   rm_state.py         Estado da réplica (papel, peers, líder, eleição)
 services/
   processing.py       Processamento de requisições de soma (exactly-once)
-  discovery.py        Descoberta por broadcast (cliente↔servidor e entre RMs)
+  discovery.py        Descoberta por broadcast (cliente↔servidor e entre RMs),
+                      descoberta do líder atual e sincronização de estado no reingresso
   replication.py      Propagação de estado para os backups
   election.py         Algoritmo de eleição de líder (valentão / bully)
   heartbeat.py        Envio e monitoramento de heartbeats
@@ -124,13 +125,35 @@ Além de ser o algoritmo exigido, o valentão é adequado a este cenário porque
 - **Não exige conhecimento global prévio:** combinado com a descoberta por
   broadcast, cada réplica só precisa conhecer os peers atuais.
 
-### 3.4 Extensão: afirmação de liderança na entrada
+### 3.4 Reingresso ao cluster (descoberta do líder atual)
 
-Implementamos um comportamento adicional coerente com o valentão: quando uma
-réplica **entra** no sistema e descobre que possui o maior ID entre os peers
-conhecidos, ela envia `COORDINATOR` imediatamente, em vez de esperar a próxima
-falha. Isso evita "split-brain" quando um RM de ID superior é iniciado depois de
-um cluster já em operação — o primário antigo (de ID menor) cede o papel na hora.
+O `rm_id` é apenas o **critério de desempate** da eleição, não a fonte da verdade
+sobre quem lidera *agora*. Por isso, ao **entrar** (ou reentrar) no sistema, uma
+réplica não assume papel a partir de `max(ID)`: ela primeiro **descobre o líder
+corrente**. Para isso usamos duas mensagens auxiliares:
+
+| Mensagem          | Significado                                                          |
+| ----------------- | ------------------------------------------------------------------- |
+| `WHO_IS_LEADER` | "Acabei de subir — quem é o primário?" — enviada aos peers/broadcast |
+| `STATE_TRANSFER`| Snapshot completo do estado, em resposta a um `STATE_REQUEST`         |
+
+O fluxo de reingresso (em `servidor_rm.py` e `services/discovery.py`) é:
+
+1. A réplica anuncia sua presença (`RM_ANNOUNCE`) para que o líder vivo a
+   reintegre à lista de peers, e faz uma sondagem `WHO_IS_LEADER` com retry.
+   Tanto um `COORDINATOR` quanto qualquer `HEARTBEAT` revelam o líder atual.
+2. **Achou um líder:** sincroniza o estado com ele (`STATE_REQUEST` →
+   `STATE_TRANSFER`) **antes** de operar. Em seguida:
+   - se possui ID **menor ou igual** ao do líder, assume o papel de backup;
+   - se possui ID **maior** (valentão), reassume a liderança por meio de uma
+     eleição limpa — mas só **depois** de já ter sincronizado o estado, de modo
+     que a retomada **não zera os dados** do cluster.
+3. **Nenhum líder responde** (partida a frio ou queda total): a disputa é
+   resolvida normalmente por uma eleição.
+
+Esse mecanismo substitui a antiga "afirmação cega de liderança na entrada" (que
+enviava `COORDINATOR` sem sincronizar estado) e é o que garante que réplicas
+reiniciadas voltem a fazer parte do cluster — ver problema 5.8.
 
 ---
 
@@ -162,7 +185,21 @@ de requisições (`num_reqs`) e a tabela de clientes (`client_id → último id_
 - Cada backup que recebe `REPLICATE` sobrescreve seu estado local
   (`apply_replicate`).
 
-### 4.3 Transparência para o cliente (notificação do novo líder)
+### 4.3 Transferência de estado sob demanda (sincronização no reingresso)
+
+A replicação `REPLICATE` é **push** e **incremental**: o estado só é propagado
+*após cada nova soma*. Isso basta para manter os backups em dia em regime, mas
+**não** sincroniza uma réplica que acabou de (re)entrar — ela continuaria com
+estado vazio até a próxima soma, e uma réplica que reassume a liderança poderia
+até sobrescrever o cluster com estado zerado.
+
+Para cobrir esse caso, adicionamos uma transferência de estado **pull**, sob
+demanda: a réplica que entra envia `STATE_REQUEST` ao líder e aplica o
+`STATE_TRANSFER` recebido (mesma rotina `apply_replicate` usada pela replicação,
+já que o formato é idêntico). É também o que usamos para re-sincronizar um
+primário que se rebaixa ao resolver um "split-brain" (ver 5.5).
+
+### 4.4 Transparência para o cliente (notificação do novo líder)
 
 A especificação exige que a troca de servidor seja transparente e que os
 clientes sejam **notificados** do novo primário. Implementamos isso de duas
@@ -176,7 +213,7 @@ formas complementares:
   responder (o novo primário). Cobre clientes que o novo líder ainda não
   conhecia.
 
-### 4.4 Consistência da soma através do failover (exactly-once)
+### 4.5 Consistência da soma através do failover (exactly-once)
 
 Para que a soma permaneça **correta** mesmo com perdas de pacotes e troca de
 servidor, cada requisição carrega um `id_req` sequencial por cliente:
@@ -191,7 +228,7 @@ Validação em teste: 2 clientes enviando 25 valores cada, com o primário sendo
 **morto no meio do fluxo**; o backup assumiu e a soma final foi exatamente
 `650`, sem repetição nem perda.
 
-### 4.5 Desafios encontrados na replicação
+### 4.6 Desafios encontrados na replicação
 
 - **Escolha entre replicação síncrona e assíncrona.** Optamos por propagação
   *fire-and-forget* (o primário não espera ACK do backup antes de responder ao
@@ -272,8 +309,13 @@ seguinte falhava ou gerava dois primários.
 **Sintoma:** um primário de ID menor, já em operação, não cedia o papel quando
 um RM de ID maior era iniciado depois.
 
-**Solução:** ao iniciar, o RM de maior ID afirma a liderança enviando
-`COORDINATOR` aos peers conhecidos (ver item 3.4).
+**Solução:** duas camadas complementares. (1) No reingresso, o RM descobre o
+líder atual e, se o supera em ID, reassume por uma eleição limpa após sincronizar
+o estado (item 3.4). (2) Como guarda contínua, o `HEARTBEAT` passou a carregar o
+ID do remetente: um primário que recebe heartbeat de um ID **maior** se rebaixa
+imediatamente a backup e re-sincroniza o estado; um de ID **menor** é ignorado
+(os próprios heartbeats do primário legítimo o farão ceder). Assim, mesmo que
+dois primários coexistam por um instante, a situação converge sozinha.
 
 ### 5.6 Tempestade de requisições duplicadas entre máquinas
 
@@ -309,6 +351,50 @@ de orientar o uso de `Ctrl+C` (encerra) em vez de `Ctrl+Z` (apenas suspende).
 Não é um defeito do código distribuído em si, mas afetou bastante a depuração e
 vale registro.
 
+### 5.8 Réplicas reiniciadas nunca reingressavam ao cluster
+
+**Sintoma:** após uma sequência de falhas — derrubar o primário (A), o sistema
+elege um novo líder, derrubar o novo líder (B), o terceiro (C) assume — ao
+reiniciar A e B eles **não voltavam a fazer parte do cluster**: ficavam isolados
+ou operando apenas localmente, sem receber replicação, sem participar de eleições
+e sem serem reconhecidos pelo líder.
+
+**Causa (arquitetural):** o papel (primário/backup) e a identidade do líder eram
+calculados **uma única vez, na construção do `RMState`, a partir de `max(ID)`**, e
+nunca mais corrigidos pelo estado real do cluster em execução. Isso produzia dois
+modos de falha no reingresso:
+
+- uma réplica que voltava acreditava que o líder era o RM de maior ID — mesmo que
+  esse RM estivesse **morto** —, ficando como backup apontado para um líder
+  fantasma. O handler de `HEARTBEAT` **descartava** o `rm_id` do remetente, então
+  os heartbeats do líder real nunca corrigiam essa crença;
+- se a descoberta de peers (janela única, sem retry) falhasse, a réplica calculava
+  `max(ID)` apenas sobre si mesma e **se autodeclarava primário isolado**, de
+  estado vazio — o sintoma "funciona só localmente".
+
+Além disso, não existia **transferência de estado sob demanda**: uma réplica que
+reassumisse a liderança começava com estado zerado, podendo sobrescrever o
+cluster.
+
+**Solução (combinada):**
+
+- protocolo de reingresso com descoberta do líder atual (`WHO_IS_LEADER`) antes
+  de assumir qualquer papel (item 3.4), com retry;
+- o `HEARTBEAT` passou a carregar o ID/endereço do líder, e o backup **aprende e
+  corrige continuamente** quem é o primário a partir dele;
+- transferência de estado **pull** (`STATE_REQUEST`/`STATE_TRANSFER`) no
+  reingresso, garantindo que ninguém volte a operar — nem reassuma a liderança —
+  com estado vazio (item 4.3);
+- ao receber `COORDINATOR` e virar backup, o monitor de falha é sempre
+  (re)iniciado, eliminando o caso de um candidato que perde a eleição e ficaria
+  sem monitor.
+
+**Validação em teste:** sobe A(id 3)/B(id 2)/C(id 1); mata A → B assume; mata B →
+C assume sozinho; injeta somas (total 60) em C; religa B e A. Resultado: B e A
+descobrem o líder corrente, sincronizam `num_reqs 3 / total_sum 60` e reassumem a
+liderança pela ordem do valentão (final: **A primário, B e C backups**), sem perda
+de estado.
+
 ---
 
 ## 6. Funcionalidades adicionais implementadas
@@ -321,6 +407,12 @@ vale registro.
   local é descoberto via tabela de rotas do SO.
 - **Notificação ativa de novo líder (`NEW_LEADER`)** além da redescoberta
   passiva, tornando o failover quase instantâneo para clientes já conhecidos.
+- **Reingresso dinâmico de réplicas (rejoin):** réplicas reiniciadas descobrem o
+  líder atual (`WHO_IS_LEADER`), sincronizam o estado sob demanda
+  (`STATE_REQUEST`/`STATE_TRANSFER`) e voltam a participar do cluster — incluindo
+  retomada da liderança pela ordem do valentão, sem perda de estado (item 5.8).
+- **Resolução automática de "split-brain":** o ID do líder viaja no heartbeat, e
+  um primário que detecta outro de ID maior se rebaixa e re-sincroniza sozinho.
 
 ---
 
@@ -334,7 +426,10 @@ funcionais, incluindo cenários multi-máquina de falha do primário:
 - comunicação exclusivamente via UDP;
 - replicação passiva com as duas garantias exigidas;
 - eleição de líder pelo algoritmo do valentão, com notificação transparente do
-  novo líder aos clientes.
+  novo líder aos clientes;
+- reingresso dinâmico de réplicas reiniciadas, com descoberta do líder atual e
+  sincronização de estado sob demanda, mantendo o cluster consistente após
+  sequências de falhas e retornos.
 
 O principal aprendizado prático foi que a maior parte da dificuldade em sistemas
 distribuídos não está no "caminho feliz", mas nas transições de estado

@@ -153,7 +153,10 @@ def handle_election_msg(
             if rm.coordinator_timer:
                 rm.coordinator_timer.cancel()
                 rm.coordinator_timer = None
-        # If we were primary, swap the heartbeat sender for a monitor so we
-        # can detect the new primary's failure and trigger a future election.
-        if was_primary and on_become_backup:
+        # Whenever we end up a backup under this COORDINATOR — whether we were
+        # the old primary stepping down or a candidate that lost the election —
+        # (re)start the failure monitor pointed at the new primary. Restarting
+        # it for an already-running backup is harmless (the old monitor is
+        # stopped first) and guarantees nobody is left without a monitor.
+        if on_become_backup:
             on_become_backup()
