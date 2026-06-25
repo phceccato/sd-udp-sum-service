@@ -15,17 +15,22 @@ Garante entrega **exatamente uma vez** (exactly-once), tolerando perdas, duplica
 
 ```
 sd-udp-sum-service/
-├── servidor.py              # ponto de entrada do servidor
+├── servidor.py              # servidor da Parte 1 (sem replicação)
+├── servidor_rm.py           # réplica (Replica Manager) — Parte 2
 ├── cliente.py               # ponto de entrada do cliente
 ├── network/
 │   ├── protocol.py          # encode/decode JSON e construtores de mensagens
 │   └── udp.py               # criação de sockets e I/O UDP
 ├── services/
-│   ├── discovery.py         # fase de descoberta broadcast/unicast
-│   └── processing.py        # lógica exactly-once de processamento
+│   ├── discovery.py         # descoberta broadcast/unicast (cliente e réplicas)
+│   ├── processing.py        # lógica exactly-once de processamento
+│   ├── replication.py       # propagação de estado para os backups
+│   ├── election.py          # algoritmo de eleição de líder (valentão/bully)
+│   └── heartbeat.py         # envio e monitoramento de heartbeats
 └── models/
     ├── client_state.py      # estado por cliente mantido no servidor
-    └── server_state.py      # estado global (num_reqs, total_sum uint64)
+    ├── server_state.py      # estado global (num_reqs, total_sum uint64)
+    └── rm_state.py          # estado da réplica (papel, peers, líder, eleição)
 ```
 
 ## Requisitos
@@ -36,11 +41,57 @@ sd-udp-sum-service/
 
 ## Como executar
 
-### Servidor
+### Servidor (Parte 1 — sem replicação)
 
 ```bash
 python3 servidor.py <porta>
 ```
+
+### Servidor replicado (Parte 2 — `servidor_rm.py`)
+
+Cada réplica (Replica Manager) sobe com um identificador único (`rm_id`). O grupo
+elege automaticamente um **primário** (maior `rm_id`, algoritmo do valentão); os
+demais ficam como **backups** que mantêm uma cópia do estado. Em caso de falha do
+primário, um backup assume e notifica os clientes.
+
+```bash
+# IP auto-detectado, peers descobertos por broadcast:
+python3 servidor_rm.py <rm_id> <porta> [peer_id:peer_ip:peer_port ...]
+
+# IP explícito:
+python3 servidor_rm.py <rm_id> <ip> <porta> [peer_id:peer_ip:peer_port ...]
+```
+
+- **`rm_id`** — inteiro único por réplica. O maior `rm_id` ativo vira o primário.
+- **`peers`** — opcional. Se omitidos, as réplicas se descobrem por broadcast na
+  mesma porta. Informe-os explicitamente quando rodar várias réplicas na **mesma
+  máquina** (portas diferentes impedem o broadcast de funcionar).
+
+**Em máquinas distintas, mesma sub-rede (peers via broadcast):**
+
+```bash
+# Estação 1
+python3 servidor_rm.py 1 4000
+# Estação 2
+python3 servidor_rm.py 2 4000
+# Estação 3
+python3 servidor_rm.py 3 4000   # maior id → assume o papel de primário
+```
+
+**Na mesma máquina (portas distintas, peers explícitos):**
+
+```bash
+# Terminal 1
+python3 servidor_rm.py 1 5001 2:127.0.0.1:5002 3:127.0.0.1:5003
+# Terminal 2
+python3 servidor_rm.py 2 5002 1:127.0.0.1:5001 3:127.0.0.1:5003
+# Terminal 3
+python3 servidor_rm.py 3 5003 1:127.0.0.1:5001 2:127.0.0.1:5002
+```
+
+O cliente é o **mesmo** dos dois casos (`cliente.py <porta>`): ele descobre o
+primário por broadcast e, se o primário cair, é notificado e migra para o novo
+líder automaticamente.
 
 ### Cliente
 
@@ -105,6 +156,17 @@ Mensagens JSON em UTF-8 sobre UDP.
 | `DISCOVERY_RESPONSE` | servidor → cliente  | `type`, `server_ip`, `port`                 |
 | `REQUEST`            | cliente → servidor  | `type`, `client_id`, `id_req`, `value`    |
 | `ACK`                | servidor → cliente  | `type`, `id_req`, `num_reqs`, `total_sum` |
+
+Mensagens adicionais da versão replicada (Parte 2), trocadas entre réplicas — e
+`NEW_LEADER`, enviada do novo primário ao cliente:
+
+| Tipo                          | Direção           | Finalidade                                  |
+| ----------------------------- | ------------------- | ------------------------------------------- |
+| `HEARTBEAT` / `HEARTBEAT_ACK` | primário ↔ backup | detecção de falha do primário               |
+| `REPLICATE`                   | primário → backup | propaga o estado após cada soma             |
+| `ELECTION` / `OK` / `COORDINATOR` | RM ↔ RM         | eleição de líder (algoritmo do valentão)    |
+| `RM_ANNOUNCE` / `RM_ANNOUNCE_ACK` | RM ↔ RM         | descoberta de réplicas por broadcast        |
+| `NEW_LEADER`                  | primário → cliente | notifica o cliente do novo líder após failover |
 
 ## Garantias de confiabilidade (Exactly-Once)
 
