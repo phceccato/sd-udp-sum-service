@@ -1,18 +1,8 @@
 # Relatório — Trabalho Prático Parte 2
+
 ## Serviço Distribuído de Soma de Inteiros com Replicação Passiva e Eleição de Líder
 
 **INF01085 — Sistemas Distribuídos e Tolerantes a Falhas — UFRGS**
-
-### Integrantes da equipe
-
-| Nome | Cartão UFRGS |
-|------|--------------|
-| Paulo Henrique Ceccato | _(preencher)_ |
-| _(integrante 2)_ | _(preencher)_ |
-| _(integrante 3)_ | _(preencher)_ |
-| _(integrante 4)_ | _(preencher)_ |
-
-Data: 24/06/2026
 
 ---
 
@@ -21,13 +11,13 @@ Data: 24/06/2026
 O desenvolvimento e os testes funcionais (incluindo os testes multi-máquina de
 failover) foram realizados no seguinte ambiente:
 
-| Item | Especificação |
-|------|---------------|
-| Sistema operacional | Ubuntu 24.04.4 LTS (Noble Numbat) |
-| Kernel | Linux 6.17.0-35-generic |
-| Processador | Intel® Core™ i7-1355U (13ª geração) — 10 núcleos / 12 threads |
-| Memória RAM | 31 GiB |
-| Linguagem / "compilador" | Python 3.12.3 (CPython) |
+| Item                     | Especificação                                                      |
+| ------------------------ | -------------------------------------------------------------------- |
+| Sistema operacional      | Ubuntu 24.04.4 LTS (Noble Numbat)                                    |
+| Kernel                   | Linux 6.17.0-35-generic                                              |
+| Processador              | Intel® Core™ i7-1355U (13ª geração) — 10 núcleos / 12 threads |
+| Memória RAM             | 31 GiB                                                               |
+| Linguagem / "compilador" | Python 3.12.3 (CPython)                                              |
 
 > **Observação sobre "compilador":** o projeto é escrito em Python 3, uma
 > linguagem interpretada — não há etapa de compilação para código de máquina.
@@ -94,11 +84,11 @@ ideia central: cada réplica tem um identificador único (`rm_id`), e o processo
 
 A implementação está em `services/election.py` e usa três mensagens:
 
-| Mensagem | Significado |
-|----------|-------------|
-| `ELECTION` | "Estou iniciando uma eleição" — enviada aos RMs de ID **maior** |
-| `OK` | "Estou vivo e tenho ID maior, pode parar" — resposta de um RM superior |
-| `COORDINATOR` | "A eleição acabou, **eu** sou o novo primário" — enviada a todos |
+| Mensagem        | Significado                                                               |
+| --------------- | ------------------------------------------------------------------------- |
+| `ELECTION`    | "Estou iniciando uma eleição" — enviada aos RMs de ID**maior**   |
+| `OK`          | "Estou vivo e tenho ID maior, pode parar" — resposta de um RM superior   |
+| `COORDINATOR` | "A eleição acabou,**eu** sou o novo primário" — enviada a todos |
 
 ### 3.2 Funcionamento passo a passo
 
@@ -106,22 +96,19 @@ A implementação está em `services/election.py` e usa três mensagens:
    (`heartbeat.py`) que observa o instante do último heartbeat recebido do
    primário. Se passar `FAILURE_TIMEOUT` (3 s) sem heartbeat, dispara uma
    eleição.
-
 2. **Início da eleição.** O RM que detectou a falha envia `ELECTION` a **todos
    os RMs com ID maior** que o seu e arma um temporizador (`ELECTION_TIMEOUT`,
    2 s).
+
    - Se **não existe** nenhum RM de ID maior, ele se declara vencedor
      imediatamente.
    - Se algum RM superior responde `OK`, ele desiste de se declarar líder e
      passa a aguardar o `COORDINATOR` daquele RM.
-
 3. **Vitória.** Se o temporizador expira **sem** ter recebido `OK`, o RM se
    declara vencedor: envia `COORDINATOR` a todos os peers, assume o papel de
    primário e passa a enviar heartbeats.
-
 4. **Aceitação.** Ao receber `COORDINATOR`, um RM reconhece o remetente como
    líder, assume o papel de backup e reinicia seu relógio de detecção de falha.
-
 5. **Recursão.** Um RM que recebe `ELECTION` de um ID **menor** responde `OK` e
    inicia sua **própria** eleição — assim a disputa propaga-se para cima até o
    maior ID vivo vencer.
@@ -155,12 +142,12 @@ Adotamos **replicação passiva (primary-backup)**: um único RM **primário**
 atende os clientes; os demais são **backups** que mantêm uma cópia do estado.
 
 O estado replicado (`ServerState`) contém: o acumulador (`total_sum`), o número
-de requisições (`num_reqs`) e a tabela de clientes (`client_id → último id_req,
-último num_reqs, último total_sum`).
+de requisições (`num_reqs`) e a tabela de clientes (`client_id → último id_req, último num_reqs, último total_sum`).
 
 ### 4.2 As duas garantias exigidas
 
 **(1) Todos os clientes sempre usam o RM primário.**
+
 - Apenas o primário responde às mensagens de descoberta (`DISCOVERY`); os
   backups ficam **silenciosos** (`discovery.py`). Assim, o broadcast de um
   cliente sempre converge para o líder atual.
@@ -168,6 +155,7 @@ de requisições (`num_reqs`) e a tabela de clientes (`client_id → último id_
   cliente acaba redescobrindo o primário correto.
 
 **(2) Após cada soma, o primário propaga o estado aos backups.**
+
 - Em `processing.py`, logo após responder o ACK ao cliente, o primário chama
   `replicate_to_backups`, que envia uma mensagem `REPLICATE` com o estado
   completo (serializado em JSON) a todas as réplicas backup (`replication.py`).
@@ -269,6 +257,7 @@ ao novo primário tempo de enviar o primeiro heartbeat.
 seguinte falhava ou gerava dois primários.
 
 **Causas e soluções (três correções combinadas):**
+
 - O remetente de um `COORDINATOR` não era adicionado à lista de peers; passamos
   a registrá-lo, para que eleições futuras enviem `ELECTION` corretamente.
 - Um RM que era primário e recebia `COORDINATOR` continuava com a thread de
@@ -292,6 +281,7 @@ um RM de ID maior era iniciado depois.
 `DUP!!` — embora a soma permanecesse correta.
 
 **Causas:**
+
 - O timeout de retransmissão do cliente era de 10 ms, menor que o tempo de
   ida-e-volta real em rede local; o cliente retransmitia antes de o ACK chegar.
 - O cliente reenviava a requisição a cada pacote inesperado recebido (ACK
