@@ -52,7 +52,10 @@ python3 servidor.py <porta>
 Cada réplica (Replica Manager) sobe com um identificador único (`rm_id`). O grupo
 elege automaticamente um **primário** (maior `rm_id`, algoritmo do valentão); os
 demais ficam como **backups** que mantêm uma cópia do estado. Em caso de falha do
-primário, um backup assume e notifica os clientes.
+primário, um backup assume e notifica os clientes. Uma réplica reiniciada
+**reingressa automaticamente**: descobre o líder atual, sincroniza o estado sob
+demanda e, se tiver o maior `rm_id`, reassume a liderança (valentão) sem perda de
+estado.
 
 ```bash
 # IP auto-detectado, peers descobertos por broadcast:
@@ -162,10 +165,12 @@ Mensagens adicionais da versão replicada (Parte 2), trocadas entre réplicas �
 
 | Tipo                          | Direção           | Finalidade                                  |
 | ----------------------------- | ------------------- | ------------------------------------------- |
-| `HEARTBEAT` / `HEARTBEAT_ACK` | primário ↔ backup | detecção de falha do primário               |
+| `HEARTBEAT` / `HEARTBEAT_ACK` | primário ↔ backup | detecção de falha do primário (o `HEARTBEAT` carrega id/endereço do líder) |
 | `REPLICATE`                   | primário → backup | propaga o estado após cada soma             |
 | `ELECTION` / `OK` / `COORDINATOR` | RM ↔ RM         | eleição de líder (algoritmo do valentão)    |
 | `RM_ANNOUNCE` / `RM_ANNOUNCE_ACK` | RM ↔ RM         | descoberta de réplicas por broadcast        |
+| `WHO_IS_LEADER`               | RM → RM/broadcast | réplica que (re)entra pergunta quem é o líder atual |
+| `STATE_REQUEST` / `STATE_TRANSFER` | RM ↔ RM       | sincronização de estado sob demanda no reingresso |
 | `NEW_LEADER`                  | primário → cliente | notifica o cliente do novo líder após failover |
 
 ## Garantias de confiabilidade (Exactly-Once)
